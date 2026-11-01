@@ -3,6 +3,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
+// .svelte matters as much as .ts here: the Stake web-sdk is a SvelteKit stack,
+// so essentially all player-facing copy - the exact thing the social
+// terminology rules govern - lives in components. Omitting it made the audit
+// pass trivially while never reading a single string the player sees.
 const TEXT_EXTENSIONS = new Set([
   ".md",
   ".txt",
@@ -13,8 +17,11 @@ const TEXT_EXTENSIONS = new Set([
   ".ts",
   ".tsx",
   ".jsx",
+  ".svelte",
+  ".vue",
   ".html",
-  ".css"
+  ".css",
+  ".scss"
 ]);
 
 const SKIP_DIRS = new Set([
@@ -26,6 +33,24 @@ const SKIP_DIRS = new Set([
   ".cache",
   "coverage"
 ]);
+
+// Restricted terms are whole words. A naive substring test flags "glowing",
+// "showing", "window" and "winter" for "win", which buries the real findings.
+function wordBoundaryMatcher(phrase) {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "iu");
+}
+
+// Only player-facing copy is governed by the terminology rules. Developer
+// comments are not shipped as text the player reads, and scanning them produces
+// far more noise than signal. Comment bodies are blanked rather than deleted so
+// reported line numbers still line up with the original file.
+function stripComments(content) {
+  return content
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + " ".repeat(m.length - p1.length));
+}
 
 function printUsage() {
   console.error(
@@ -110,25 +135,23 @@ function runAudit(rulesPath, targetPath, isSocial, format) {
 
     // Check Restricted Terms
     if (rules.restrictedTerms) {
+      const lines = stripComments(content).split("\n");
       for (const term of rules.restrictedTerms) {
         if (term.socialOnly && !isSocial) continue;
-        
-        const phrase = term.phrase.toLowerCase();
-        if (lowerContent.includes(phrase)) {
-          // Simple check: find line number
-          const lines = content.split("\n");
-          lines.forEach((line, idx) => {
-            if (line.toLowerCase().includes(phrase)) {
-              issues.push({
-                file: path.relative(process.cwd(), file),
-                line: idx + 1,
-                type: "RESTRICTED_TERM",
-                message: `Found prohibited term "${term.phrase}". Replacement: "${term.replacement}"`,
-                context: line.trim().substring(0, 100)
-              });
-            }
-          });
-        }
+
+        const matcher = wordBoundaryMatcher(term.phrase);
+        lines.forEach((line, idx) => {
+          if (!line.trim()) return;
+          if (matcher.test(line)) {
+            issues.push({
+              file: path.relative(process.cwd(), file),
+              line: idx + 1,
+              type: "RESTRICTED_TERM",
+              message: `Found prohibited term "${term.phrase}". Replacement: "${term.replacement}"`,
+              context: line.trim().substring(0, 100)
+            });
+          }
+        });
       }
     }
 

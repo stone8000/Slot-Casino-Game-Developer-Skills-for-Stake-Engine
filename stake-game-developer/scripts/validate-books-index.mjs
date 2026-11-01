@@ -3,7 +3,13 @@
 import fs from "node:fs";
 import path from "node:path";
 
+// `events` and `weights` are the keys the Stake Engine index.json actually
+// uses (see math-sdk src/write_data/write_configs.py). Without them every mode
+// reported "no known file reference keys" and the existence check - the whole
+// point of this script - silently did nothing.
 const PATH_KEYS = [
+  "events",
+  "weights",
   "book",
   "bookFile",
   "bookPath",

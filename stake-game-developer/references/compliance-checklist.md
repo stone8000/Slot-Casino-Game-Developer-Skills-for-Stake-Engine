@@ -42,6 +42,31 @@ node scripts/audit-checklist.mjs \
 - Do not use prohibited “bet/buy/gamble” style wording in social context.
 - Ensure SC/GC display rules are respected where required.
 
+## Reading the social audit
+
+`audit-checklist.mjs --social true` is a text scan, so three classes of hit are
+expected and are not violations. Triage them before treating the count as a
+blocker:
+
+- **Code identifiers.** `symbolState === 'win'`, `import Win from …`,
+  `win.positions`. The scanner cannot tell an identifier from player copy.
+- **Dual-wording branches.** Games that localise terminology per mode hold both
+  variants in source, e.g.
+  `bet: social ? 'amount' : 'bet'`. The non-social branch will always be
+  flagged even though it never renders in social mode. This is the correct
+  implementation, not a defect.
+- **Test fixtures.** Book/event JSON under `stories/`, `fixtures/` or similar
+  is data, not copy. Point `--target` at the source directories that actually
+  ship player text.
+
+What *is* a real finding: a restricted term inside a literal string that reaches
+the player unconditionally - button labels, modal prose, ticker text,
+error messages.
+
+The scanner matches whole words only and skips comment bodies, so
+"glowing"/"window" no longer match "win" and developer notes are ignored.
+
 ## Fail Policy
 
-Any compliance violation is a hard fail for release recommendation.
+Any confirmed compliance violation is a hard fail for release recommendation.
+Triage the social audit per the section above before applying this.

@@ -3,26 +3,38 @@
 import fs from "node:fs";
 import path from "node:path";
 
+// Canonical set from math-sdk `src/events/event_constants.py` (EventConstants),
+// plus legacy/frontend-only types kept for backwards compatibility.
 const ALLOWED_EVENT_TYPES = new Set([
-  "spinstart",
+  // math-sdk canonical
   "reveal",
   "wininfo",
+  "finalwin",
   "setwin",
   "settotalwin",
-  "finalwin",
-  "multiplierupdate",
-  "updateglobalmult",
-  "bonustrigger",
+  "wincap",
+  "updatefreespin",
   "freespintrigger",
   "freespinretrigger",
-  "enterbonus",
-  "updatefreespin",
   "freespinend",
+  "enterbonus",
+  "tumbleboard",
+  "settumblewin",
+  "updatetumblewin",
+  "updateglobalmult",
+  // legacy / game-specific
+  "spinstart",
+  "multiplierupdate",
+  "bonustrigger",
   "stickyzones",
   "newstickysymbols",
   "bonuspick",
   "roundresult"
 ]);
+
+// Game-specific event types declared via --allow-event. Games legitimately define
+// their own events in games/<name>/game_events.py (e.g. newExpandingWilds).
+const declaredEventTypes = new Set();
 
 const ROUND_INDEX_TYPES = new Set([
   "reveal",
@@ -33,14 +45,19 @@ const ROUND_INDEX_TYPES = new Set([
 
 function printUsage() {
   console.error(
-    "Usage: node scripts/validate-rgs-events.mjs --input <json|jsonl> [--format json|text]"
+    "Usage: node scripts/validate-rgs-events.mjs --input <json|jsonl> [--format json|text] [--allow-event <type[,type...]>]"
   );
+  console.error(
+    "  --allow-event  Declare game-specific event types defined in games/<name>/game_events.py."
+  );
+  console.error("                 Repeatable and/or comma-separated. Suppresses unknown_event_type.");
 }
 
 function parseArgs(argv) {
   const args = {
     input: "",
-    format: "json"
+    format: "json",
+    allowEvents: []
   };
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -53,6 +70,9 @@ function parseArgs(argv) {
         throw new Error("--format must be 'json' or 'text'");
       }
       args.format = value;
+      i += 1;
+    } else if (key === "--allow-event" && value) {
+      args.allowEvents.push(...value.split(","));
       i += 1;
     } else if (key.startsWith("--")) {
       throw new Error(`Unknown option: ${key}`);
@@ -223,6 +243,66 @@ function parseRounds(filePath, text) {
   }
 }
 
+function readLines(filePath, onLine) {
+  const CHUNK = 1 << 20;
+  const handle = fs.openSync(filePath, "r");
+  const buffer = Buffer.allocUnsafe(CHUNK);
+  const decoder = new TextDecoder("utf8");
+  let carry = "";
+  let lineNumber = 0;
+
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(handle, buffer, 0, CHUNK, null);
+      if (bytesRead === 0) break;
+      // stream: true keeps multi-byte characters intact across chunk edges.
+      carry += decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+
+      let newline;
+      while ((newline = carry.indexOf("\n")) !== -1) {
+        const line = carry.slice(0, newline);
+        carry = carry.slice(newline + 1);
+        lineNumber += 1;
+        if (line.trim()) onLine(line, lineNumber);
+      }
+    }
+    carry += decoder.decode();
+    if (carry.trim()) onLine(carry, lineNumber + 1);
+  } finally {
+    fs.closeSync(handle);
+  }
+}
+
+function validateJsonlStream(filePath, errors, warnings) {
+  let roundsChecked = 0;
+
+  readLines(filePath, (line, lineNumber) => {
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`Invalid JSONL line ${lineNumber}: ${error.message}`);
+    }
+
+    // A bare event object per line means the file is one round's event stream,
+    // which cannot be validated incrementally - fall back to the buffered path.
+    if (parsed && typeof parsed.type === "string" && !Array.isArray(parsed.events)) {
+      throw new Error(
+        "Input looks like a flat event stream rather than one round per line; " +
+          "re-run with a .json extension to use the buffered parser."
+      );
+    }
+
+    const round = normalizeRoundObject(parsed, lineNumber - 1);
+    if (round) {
+      validateRound(round, errors, warnings);
+      roundsChecked += 1;
+    }
+  });
+
+  return roundsChecked;
+}
+
 function pushError(errors, roundId, eventIndex, code, message) {
   errors.push({ roundId, eventIndex, code, message });
 }
@@ -260,6 +340,10 @@ function validateRound(round, errors, warnings) {
   let revealCount = 0;
   let lastRoundIndex = -Infinity;
   let winInfoSum = 0;
+  // On a capped round `win_info_event` clamps totalWin to the cap while leaving
+  // the individual wins[] entries untruncated, so totalWin < sum(wins) is
+  // expected rather than a defect.
+  const roundHasWinCap = normalizedTypes.includes("wincap");
 
   normalizedTypes.forEach((type, index) => {
     const event = events[index];
@@ -268,7 +352,7 @@ function validateRound(round, errors, warnings) {
       return;
     }
 
-    if (!ALLOWED_EVENT_TYPES.has(type)) {
+    if (!ALLOWED_EVENT_TYPES.has(type) && !declaredEventTypes.has(type)) {
       pushWarning(
         warnings,
         roundId,
@@ -320,7 +404,13 @@ function validateRound(round, errors, warnings) {
         winInfoSum += totals.total;
       }
 
-      if (totals.totalWin !== null && totals.winsSum !== null && totals.totalWin !== totals.winsSum) {
+      const cappedTruncation = roundHasWinCap && totals.totalWin < totals.winsSum;
+      if (
+        totals.totalWin !== null &&
+        totals.winsSum !== null &&
+        totals.totalWin !== totals.winsSum &&
+        !cappedTruncation
+      ) {
         pushWarning(
           warnings,
           roundId,
@@ -374,9 +464,9 @@ function validateRound(round, errors, warnings) {
   const setTotalWinIndices = [];
   const setWinIndices = [];
   const fsTriggerIndices = [];
-  let hasEnterBonus = false;
   let hasFreeSpinEnd = false;
   let hasUpdateFreeSpin = false;
+  let winCapIndex = null;
 
   normalizedTypes.forEach((type, index) => {
     if (type === "finalwin") finalWinIndices.push(index);
@@ -384,9 +474,9 @@ function validateRound(round, errors, warnings) {
     if (type === "settotalwin") setTotalWinIndices.push(index);
     if (type === "setwin") setWinIndices.push(index);
     if (type === "freespintrigger" || type === "freespinretrigger") fsTriggerIndices.push(index);
-    if (type === "enterbonus") hasEnterBonus = true;
     if (type === "freespinend") hasFreeSpinEnd = true;
     if (type === "updatefreespin") hasUpdateFreeSpin = true;
+    if (type === "wincap" && winCapIndex === null) winCapIndex = index;
   });
 
   if (finalWinIndices.length > 1) {
@@ -508,7 +598,9 @@ function validateRound(round, errors, warnings) {
       }
     });
 
-    if (terminalTotal !== null && terminalTotal > 0 && setWinIndices.length === 0) {
+    // `set_win_event` is suppressed once the cap is hit, so a round that caps on
+    // its first paying spin legitimately carries no setWin at all.
+    if (terminalTotal !== null && terminalTotal > 0 && setWinIndices.length === 0 && !roundHasWinCap) {
       pushWarning(
         warnings,
         roundId,
@@ -550,6 +642,38 @@ function validateRound(round, errors, warnings) {
         "bonusPick.payout must equal terminal total amount."
       );
     }
+  } else if (terminalTotal !== null && winCapIndex !== null) {
+    // Max-win round: math-sdk truncates the payout at `config.wincap`
+    // (see src/events/events.py::wincap_event), so raw winInfo totals may
+    // legitimately exceed the terminal amount. Reconcile against the cap instead.
+    const winCapAmount = toInteger(events[winCapIndex]?.amount);
+    if (winCapAmount === null || winCapAmount < 0) {
+      pushError(
+        errors,
+        roundId,
+        winCapIndex,
+        "invalid_wincap_amount",
+        "wincap.amount must be integer >= 0."
+      );
+    } else if (winCapAmount !== terminalTotal) {
+      pushError(
+        errors,
+        roundId,
+        winCapIndex,
+        "wincap_terminal_mismatch",
+        "wincap.amount must equal terminal total amount."
+      );
+    }
+
+    if (winInfoSum < terminalTotal) {
+      pushError(
+        errors,
+        roundId,
+        null,
+        "wincap_below_terminal",
+        "Capped round: sum(winInfo totals) must be >= terminal total amount."
+      );
+    }
   } else if (terminalTotal !== null && winInfoSum !== terminalTotal) {
     pushError(
       errors,
@@ -571,15 +695,8 @@ function validateRound(round, errors, warnings) {
 
   const hasFreeSpinContext = hasUpdateFreeSpin || hasFreeSpinEnd || hasFreeSpinReveal;
 
-  if (fsTriggerIndices.length > 0 && !hasEnterBonus) {
-    pushWarning(
-      warnings,
-      roundId,
-      null,
-      "missing_enter_bonus",
-      "freeSpinTrigger present without enterBonus event."
-    );
-  }
+  // Note: `enterBonus` is defined in math-sdk's EventConstants but is emitted by
+  // no official sample game, so its absence is not a contract violation.
 
   if (fsTriggerIndices.length > 0 && hasFreeSpinContext && !hasFreeSpinReveal) {
     pushWarning(
@@ -649,37 +766,59 @@ function main() {
     process.exit(2);
   }
 
+  for (const type of args.allowEvents) {
+    const normalized = normalizeType(type);
+    if (normalized) {
+      declaredEventTypes.add(normalized);
+    }
+  }
+
   const inputPath = path.resolve(args.input);
   if (!fs.existsSync(inputPath)) {
     console.error(`Input file not found: ${inputPath}`);
     process.exit(2);
   }
 
-  const text = fs.readFileSync(inputPath, "utf8");
-  let rounds;
-  try {
-    rounds = parseRounds(inputPath, text);
-  } catch (error) {
-    console.error(error.message);
-    process.exit(2);
-  }
-
   const errors = [];
   const warnings = [];
-  if (!Array.isArray(rounds) || rounds.length === 0) {
+  let roundsChecked = 0;
+
+  if (path.extname(inputPath).toLowerCase() === ".jsonl") {
+    // Production books routinely exceed Node's maximum string length
+    // (~512 MB), so JSONL is validated a line at a time instead of being
+    // slurped into one string.
+    try {
+      roundsChecked = validateJsonlStream(inputPath, errors, warnings);
+    } catch (error) {
+      console.error(error.message);
+      process.exit(2);
+    }
+  } else {
+    let rounds;
+    try {
+      rounds = parseRounds(inputPath, fs.readFileSync(inputPath, "utf8"));
+    } catch (error) {
+      console.error(error.message);
+      process.exit(2);
+    }
+    if (Array.isArray(rounds)) {
+      rounds.forEach((round) => validateRound(round, errors, warnings));
+      roundsChecked = rounds.length;
+    }
+  }
+
+  if (roundsChecked === 0 && errors.length === 0) {
     errors.push({
       roundId: null,
       eventIndex: null,
       code: "no_rounds",
       message: "No rounds could be parsed from input."
     });
-  } else {
-    rounds.forEach((round) => validateRound(round, errors, warnings));
   }
 
   const result = {
     status: errors.length > 0 ? "fail" : "pass",
-    roundsChecked: Array.isArray(rounds) ? rounds.length : 0,
+    roundsChecked,
     errors,
     warnings
   };

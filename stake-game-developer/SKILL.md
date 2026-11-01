@@ -16,16 +16,26 @@ Run `scripts/validate-books-index.mjs`.
 3. Validate event stream contract and sequencing.
 Run `scripts/validate-rgs-events.mjs`.
 4. Validate frontend integration expectations.
-Load `references/frontend-integration.md` and `references/rgs-event-contract.md`.20→ 5. Run compliance gate checks before release review.
-21→ Run `scripts/audit-checklist.mjs` using `references/compliance-rules.json` and `references/compliance-checklist.md`.
-22→
-23→ 6. Final Approval Check.
-24→ Validate full game against `references/game-approval-checklist.md` (PreChecks, Math, Frontend, Jurisdiction).
-25→
-26→ ## Commands```bash
+Load `references/frontend-integration.md` and `references/rgs-event-contract.md`.
+5. Run compliance gate checks before release review.
+Run `scripts/audit-checklist.mjs` using `references/compliance-rules.json` and `references/compliance-checklist.md`.
+
+6. Final Approval Check.
+Validate full game against `references/game-approval-checklist.md` (PreChecks, Math, Frontend, Jurisdiction).
+
+## Commands
+
+```bash
 node scripts/validate-books-index.mjs --index <path/to/index.json> --format text
-node scripts/validate-rgs-events.mjs --input <path/to/events.jsonl> --format text
+node scripts/validate-rgs-events.mjs --input <path/to/books.jsonl> --format text
 node scripts/audit-checklist.mjs --rules references/compliance-rules.json --target <project-or-doc-path> --social true --format text
+```
+
+If the game defines custom events in `games/<name>/game_events.py`, declare them:
+
+```bash
+node scripts/validate-rgs-events.mjs --input <path/to/books.jsonl> --format text \
+  --allow-event newExpandingWilds,updateExpandingWilds
 ```
 
 Treat non-zero exits as hard blockers for release readiness.
@@ -35,15 +45,16 @@ Treat non-zero exits as hard blockers for release readiness.
 - `references/workflow.md`: End-to-end process and required gates.
 - `references/book-generation-validation.md`: Book generation and index validation expectations.
 - `references/rgs-event-contract.md`: Required event order and field expectations.
-- `references/frontend-integration.md`: Deterministic player integration patterns.40→ - `references/compliance-checklist.md`: Stake checklist and jurisdiction requirements.
-41→ - `references/compliance-rules.json`: Machine-readable restricted phrase and required-phrase checks.
+- `references/frontend-integration.md`: Deterministic player integration patterns.
+- `references/compliance-checklist.md`: Stake checklist and jurisdiction requirements.
+- `references/compliance-rules.json`: Machine-readable restricted phrase and required-phrase checks.
 - `references/game-approval-checklist.md`: Comprehensive QA/Release sign-off gates.
 - `references/stake-engine-rgs.md`: Stake Engine RGS API and wallet flow details.
 - `references/stake-engine-replay.md`: Stake Engine replay mode requirements.
 - `references/stake-engine-frontend-checklist.md`: Frontend compliance checklist.
 - `references/currency-rules.md`: **CRITICAL** formulas for API (x1e6) vs Book (x100) scaling.
-43→
-44→ ## Execution Rules
+
+## Execution Rules
 
 - **Strict Currency/Math Scaling:**
   - **API (Wallet/RGS):** Use `1,000,000` scale. `display = api / 1e6`, `api = display * 1e6`.
